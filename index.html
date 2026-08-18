@@ -74,6 +74,10 @@
     line-height: 1.5;
   }
   .hd-sub b { font-family: var(--mono); font-weight: 600; color: var(--ink); }
+  .sync { font-family: var(--mono); font-size: 11.5px; color: var(--ink3); }
+  .sync.saving { color: var(--signal); }
+  .sync.saved { color: var(--done); }
+  .sync.error { color: var(--alc); }
 
   /* ---------- card ---------- */
   .card {
@@ -323,6 +327,10 @@
 
 <script>
 (function () {
+  // ▼▼▼ Apps Script 웹앱 URL을 여기에 붙여넣으세요 ▼▼▼
+  var API = 'https://script.google.com/macros/s/AKfycbxpjM4Um6LgsXn1zS5wa72f5B-ihPyZDgl2y6WK-t3cFE4HUFyKGo_aUh7qjy1GUe0vvQ/exec';
+  // ▲▲▲ 예: https://script.google.com/macros/s/AKfyc.../exec ▲▲▲
+
   var KEY = 'training-log-v1';
   var GOAL = { date: '2026-11-30', weight: 75.0, fat: 16.0 };
   var SEED = { date: '2026-08-17', weight: 77.4, fat: 19.5 };
@@ -353,6 +361,8 @@
 
   var data = { days: {}, inbody: [] };
   var weekOffset = 0;
+  var syncState = 'idle';
+  var saveTimer = null;
   var root = document.getElementById('root');
 
   /* ---------- date helpers ---------- */
@@ -373,18 +383,68 @@
   function weeksBetween(a, b) { return Math.max(0, Math.round((b - a) / 604800000)); }
 
   /* ---------- storage ---------- */
-  async function load() {
-    try {
-      var raw = localStorage.getItem(KEY);
-      if (raw) data = JSON.parse(raw);
-    } catch (e) { /* first run */ }
+  function normalize() {
     if (!data.days) data.days = {};
     if (!data.inbody) data.inbody = [];
     if (data.inbody.length === 0) data.inbody.push(SEED);
   }
+
+  function cache() {
+    try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) {}
+  }
+
+  function syncLabel() {
+    if (!API) return '로컬 저장';
+    if (syncState === 'loading') return '불러오는 중';
+    if (syncState === 'saving') return '저장 중';
+    if (syncState === 'saved') return '시트 저장됨';
+    if (syncState === 'error') return '시트 연결 실패';
+    return '';
+  }
+
+  function updateSync() {
+    var el = document.getElementById('sync');
+    if (!el) return;
+    el.textContent = syncLabel();
+    el.className = 'sync ' + syncState + (API ? '' : ' idle');
+  }
+
+  async function load() {
+    try {
+      var raw = localStorage.getItem(KEY);
+      if (raw) data = JSON.parse(raw);
+    } catch (e) {}
+    normalize();
+    if (!API) return;
+    syncState = 'loading';
+    try {
+      var res = await fetch(API + '?t=' + Date.now());
+      var j = await res.json();
+      if (j && j.days) { data = j; normalize(); cache(); syncState = 'saved'; }
+      else syncState = 'error';
+    } catch (e) { syncState = 'error'; }
+  }
+
   async function save() {
-    try { localStorage.setItem(KEY, JSON.stringify(data)); }
-    catch (e) { flash('저장하지 못했어요. 브라우저 저장 공간을 확인해 주세요.', true); }
+    cache();
+    if (!API) return;
+    syncState = 'saving';
+    updateSync();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(push, 700);
+  }
+
+  async function push() {
+    try {
+      var res = await fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(data)
+      });
+      var j = await res.json();
+      syncState = (j && j.ok) ? 'saved' : 'error';
+    } catch (e) { syncState = 'error'; }
+    updateSync();
   }
 
   /* ---------- derived ---------- */
@@ -495,7 +555,8 @@
         '<div class="hd-eyebrow">Weekly Log</div>' +
         '<h1 class="hd-title">주간 기록판</h1>' +
         '<div class="hd-sub">1차 목표 <b>11.30 · 75.0kg / 16.0%</b> · 남은 기간 <b>' +
-          weeksLeft + '주</b></div>' +
+          weeksLeft + '주</b> · <span id="sync" class="sync ' + syncState + '">' +
+          syncLabel() + '</span></div>' +
       '</div>' +
 
       '<div class="card">' +
@@ -613,11 +674,9 @@
       var txt = JSON.stringify(data);
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(txt).then(function () {
-          flash('백업 문자열을 복사했어요. 메모장에 붙여넣어 두세요.');
+          flash('백업 문자열을 복사했어요.');
         }, function () { prompt('아래 문자열을 복사해 두세요.', txt); });
-      } else {
-        prompt('아래 문자열을 복사해 두세요.', txt);
-      }
+      } else { prompt('아래 문자열을 복사해 두세요.', txt); }
     });
 
     document.getElementById('restore').addEventListener('click', async function () {
@@ -626,13 +685,9 @@
       try {
         var parsed = JSON.parse(txt);
         if (!parsed.days || !parsed.inbody) throw new Error('bad');
-        data = parsed;
-        await save();
-        render();
-        flash('백업을 불러왔어요.');
-      } catch (e) {
-        flash('문자열을 읽지 못했어요. 다시 확인해 주세요.', true);
-      }
+        data = parsed; normalize();
+        await save(); render(); flash('백업을 불러왔어요.');
+      } catch (e) { flash('문자열을 읽지 못했어요.', true); }
     });
 
     document.getElementById('reset').addEventListener('click', async function () {
@@ -644,7 +699,7 @@
     });
   }
 
-  load().then(render).catch(function () {
+  load().then(function () { render(); updateSync(); }).catch(function () {
     root.innerHTML = '<div class="boot">기록을 불러오지 못했어요. 새로고침해 주세요.</div>';
   });
 })();
