@@ -407,7 +407,7 @@
     try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) {}
   }
 
-  var BUILD = 'v2';
+  var BUILD = 'v3';
 
   function syncLabel() {
     if (!API) return '로컬 저장 (URL 미설정)';
@@ -441,27 +441,35 @@
     } catch (e) { syncState = 'error'; }
   }
 
-  async function save() {
+  async function call(params) {
     cache();
     if (!API) return;
     syncState = 'saving';
     updateSync();
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(push, 700);
-  }
-
-  async function push() {
+    var qs = Object.keys(params).map(function (k) {
+      return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+    }).join('&');
     try {
-      var res = await fetch(API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(data)
-      });
+      var res = await fetch(API + '?' + qs + '&t=' + Date.now());
       var j = await res.json();
       syncState = (j && j.ok) ? 'saved' : 'error';
     } catch (e) { syncState = 'error'; }
     updateSync();
   }
+
+  function saveDay(dateKey) {
+    return call({ action: 'day', date: dateKey, chips: (data.days[dateKey] || []).join(',') });
+  }
+
+  function saveInbody(entry) {
+    return call({ action: 'inbody', date: entry.date, weight: entry.weight, fat: entry.fat });
+  }
+
+  function saveAll() {
+    return call({ action: 'replace', payload: JSON.stringify(data) });
+  }
+
+  async function save() { cache(); }
 
   /* ---------- derived ---------- */
   function sorted() {
@@ -664,7 +672,7 @@
         if (i === -1) arr.push(chip); else arr.splice(i, 1);
         if (arr.length) data.days[date] = arr; else delete data.days[date];
         render();
-        await save();
+        await saveDay(date);
       });
     });
 
@@ -681,9 +689,10 @@
       if (w < 40 || w > 150 || f < 3 || f > 50) { flash('숫자를 다시 확인해 주세요.', true); return; }
       var key = iso(today());
       data.inbody = data.inbody.filter(function (e) { return e.date !== key; });
-      data.inbody.push({ date: key, weight: w, fat: f });
-      await save();
+      var entry = { date: key, weight: w, fat: f };
+      data.inbody.push(entry);
       render();
+      await saveInbody(entry);
       flash('기록했어요.');
     });
 
@@ -703,16 +712,16 @@
         var parsed = JSON.parse(txt);
         if (!parsed.days || !parsed.inbody) throw new Error('bad');
         data = parsed; normalize();
-        await save(); render(); flash('백업을 불러왔어요.');
+        render(); await saveAll(); flash('백업을 불러왔어요.');
       } catch (e) { flash('문자열을 읽지 못했어요.', true); }
     });
 
     document.getElementById('reset').addEventListener('click', async function () {
       if (!confirm('모든 체크와 인바디 기록을 지울까요? 되돌릴 수 없어요.')) return;
       data = { days: {}, inbody: [SEED] };
-      await save();
       weekOffset = 0;
       render();
+      await saveAll();
     });
   }
 
